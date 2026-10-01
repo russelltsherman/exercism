@@ -1,0 +1,249 @@
+package ledger
+
+import (
+	"errors"
+    "fmt"
+	"strconv"
+	"strings"
+)
+
+type Header struct {
+    Date string
+    Description string
+    Change string
+}
+
+type Entry struct {
+	Date        string // "Y-m-d"
+	Description string
+	Change      int // in cents
+}
+
+type LocaleSet map[string]Header
+
+func (i LocaleSet) Has(v string) bool {
+  _, ok := i[v]
+  return ok
+}
+
+func SetLocales() LocaleSet {
+	locales := make(LocaleSet)
+    locales["nl-NL"] = Header{
+        Date: "Datum",
+        Description: "Omschrijving",
+        Change: "Verandering",
+    }
+    locales["en-US"] = Header{
+        Date: "Date",
+        Description: "Description",
+        Change: "Change",
+    }  
+	return locales
+}
+
+func FormatLedger(currency string, locale string, entries []Entry) (string, error) {
+	locales := SetLocales()
+    
+    var entriesCopy []Entry
+	for _, e := range entries {
+		entriesCopy = append(entriesCopy, e)
+	}
+	if len(entries) == 0 {
+		if _, err := FormatLedger(currency, "en-US", []Entry{{Date: "2014-01-01", Description: "", Change: 0}}); err != nil {
+			return "", err
+		}
+	}
+	m1 := map[bool]int{true: 0, false: 1}
+	m2 := map[bool]int{true: -1, false: 1}
+	es := entriesCopy
+	for len(es) > 1 {
+		first, rest := es[0], es[1:]
+		success := false
+		for !success {
+			success = true
+			for i, e := range rest {
+				if (m1[e.Date == first.Date]*m2[e.Date < first.Date]*4 +
+					m1[e.Description == first.Description]*m2[e.Description < first.Description]*2 +
+					m1[e.Change == first.Change]*m2[e.Change < first.Change]*1) < 0 {
+					es[0], es[i+1] = es[i+1], es[0]
+					success = false
+				}
+			}
+		}
+		es = es[1:]
+	}
+	
+	var s string
+	if locales.Has(locale) {
+        h0 := locales[locale].Date
+        h1 := locales[locale].Description
+        h2 := locales[locale].Change
+		s = fmt.Sprintf("%s%s | %s%s | %s%s\n", h0, strings.Repeat(" ", 10-len(h0)), h1, strings.Repeat(" ", 25-len(h1)), h2, strings.Repeat(" ", 13-len(h2)))
+    } else {
+        return "", errors.New("unsupported locale")
+    }
+
+	// Parallelism, always a great idea
+	co := make(chan struct {
+		i int
+		s string
+		e error
+	})
+
+	for i, et := range entriesCopy {
+		go func(i int, entry Entry) {
+			if len(entry.Date) != 10 {
+				co <- struct {
+					i int
+					s string
+					e error
+				}{e: errors.New("entry date is invalid")}
+			}
+			d1, d2, d3, d4, d5 := entry.Date[0:4], entry.Date[4], entry.Date[5:7], entry.Date[7], entry.Date[8:10]
+			if d2 != '-' {
+				co <- struct {
+					i int
+					s string
+					e error
+				}{e: errors.New("wrong date delimiter")}
+			}
+			if d4 != '-' {
+				co <- struct {
+					i int
+					s string
+					e error
+				}{e: errors.New("wrong date delimiter")}
+			}
+			de := entry.Description
+			if len(de) > 25 {
+				de = de[:22] + "..."
+			} else {
+				de = de + strings.Repeat(" ", 25-len(de))
+			}
+			var d string
+			if locale == "nl-NL" {
+				d = d5 + "-" + d3 + "-" + d1
+			}
+            if locale == "en-US" {
+				d = d3 + "/" + d5 + "/" + d1
+			}
+			negative := false
+			cents := entry.Change
+			if cents < 0 {
+				cents = cents * -1
+				negative = true
+			}
+			var a string
+			if locale == "nl-NL" {
+				if currency == "EUR" {
+					a += "€"
+				} else if currency == "USD" {
+					a += "$"
+				} else {
+					co <- struct {
+						i int
+						s string
+						e error
+					}{e: errors.New("unsupported currency")}
+				}
+				a += " "
+				centsStr := strconv.Itoa(cents)
+				switch len(centsStr) {
+				case 1:
+					centsStr = "00" + centsStr
+				case 2:
+					centsStr = "0" + centsStr
+				}
+				rest := centsStr[:len(centsStr)-2]
+				var parts []string
+				for len(rest) > 3 {
+					parts = append(parts, rest[len(rest)-3:])
+					rest = rest[:len(rest)-3]
+				}
+				if len(rest) > 0 {
+					parts = append(parts, rest)
+				}
+				if negative {
+					a += "-"
+				}
+				for i := len(parts) - 1; i >= 0; i-- {
+					a += parts[i] + "."
+				}
+				a = a[:len(a)-1]
+				a += ","
+				a += centsStr[len(centsStr)-2:]
+				a += " "
+			} else if locale == "en-US" {
+				if negative {
+					a += "("
+				}
+				if currency == "EUR" {
+					a += "€"
+				} else if currency == "USD" {
+					a += "$"
+				} else {
+					co <- struct {
+						i int
+						s string
+						e error
+					}{e: errors.New("unsupported currency")}
+				}
+				centsStr := strconv.Itoa(cents)
+				switch len(centsStr) {
+				case 1:
+					centsStr = "00" + centsStr
+				case 2:
+					centsStr = "0" + centsStr
+				}
+				rest := centsStr[:len(centsStr)-2]
+				var parts []string
+				for len(rest) > 3 {
+					parts = append(parts, rest[len(rest)-3:])
+					rest = rest[:len(rest)-3]
+				}
+				if len(rest) > 0 {
+					parts = append(parts, rest)
+				}
+				for i := len(parts) - 1; i >= 0; i-- {
+					a += parts[i] + ","
+				}
+				a = a[:len(a)-1]
+				a += "."
+				a += centsStr[len(centsStr)-2:]
+				if negative {
+					a += ")"
+				} else {
+					a += " "
+				}
+			} else {
+				co <- struct {
+					i int
+					s string
+					e error
+				}{e: errors.New("unsupported locale")}
+			}
+			var al int
+			for range a {
+				al++
+			}
+			co <- struct {
+				i int
+				s string
+				e error
+			}{i: i, s: d + strings.Repeat(" ", 10-len(d)) + " | " + de + " | " +
+				strings.Repeat(" ", 13-al) + a + "\n"}
+		}(i, et)
+	}
+	ss := make([]string, len(entriesCopy))
+	for range entriesCopy {
+		v := <-co
+		if v.e != nil {
+			return "", v.e
+		}
+		ss[v.i] = v.s
+	}
+	for i := range len(entriesCopy) {
+		s += ss[i]
+	}
+	return s, nil
+}
